@@ -8,6 +8,8 @@ import {
   digest,
   drifted,
   isCorrection,
+  idleCosts,
+  idleText,
   keepCost,
   learnRate,
   pctText,
@@ -271,12 +273,20 @@ describe('usage share', () => {
 
   test('one warm counts against 5h, a 10h keep against the week', () => {
     expect(Math.round(keepCost(0.1, 600 * 60_000, 60 * 60_000) * 100)).toBe(110)
-    expect(shareLine(0.1, 600 * 60_000, 60 * 60_000, { five_hour: 2, seven_day: 0.5 })).toEqual({
-      warm: '0.2% 5h',
-      keep: '0.6% wk',
-    })
-    expect(shareLine(0.1, 600 * 60_000, 60 * 60_000, {})).toEqual({ warm: '', keep: '' })
+    expect(shareLine(costs(200_000, 40_000, 5), 600 * 60_000, 60 * 60_000, {})).toEqual({ warm: '', keep: '', cold: '' })
     expect(pctText(0.01, 1, '5h')).toBe('<0.1% 5h')
+  })
+
+  test('a prompt after 10h idle: kept warm against cold, both against the week', () => {
+    // 200k context at $5/MTok: a ping $0.10 (+ output), a cached turn $0.10, a cold rewrite $2.00
+    const c = costs(200_000, 40_000, 5)
+    const idle = idleCosts(c, 600 * 60_000, 60 * 60_000)
+    expect(Math.round(idle.keep * 100)).toBe(120)
+    expect(Math.round(idle.cold * 100)).toBe(200)
+    const sh = shareLine(c, 600 * 60_000, 60 * 60_000, { five_hour: 2, seven_day: 0.5 })
+    expect(sh).toEqual({ warm: '0.2% 5h', keep: '0.6% wk', cold: '1.0% wk' })
+    expect(idleText(c, 600 * 60_000, 60 * 60_000, sh)).toBe('10h: keep 0.6% vs cold 1.0% wk')
+    expect(idleText(c, 600 * 60_000, 60 * 60_000, { keep: '', cold: '' })).toBe('10h: keep $1.20 vs cold $2.00')
   })
 })
 

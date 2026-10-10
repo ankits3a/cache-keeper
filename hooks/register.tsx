@@ -342,12 +342,30 @@ export function pctText(spendUsd: number, pctPerUsd: number | undefined, label: 
   return `${p < 0.1 ? '<0.1' : p < 10 ? p.toFixed(1) : p.toFixed(0)}% ${label}`
 }
 
-/** One warm against the 5-hour window, a keep-warm span against the weekly one. */
-export function shareLine(pingUsd: number, keepMs: number, ttlMs: number, r: Rates): { warm: string; keep: string } {
+/**
+ * A prompt sent after `keepMs` idle, two ways: kept warm (the pings, then a
+ * cached turn) or left cold (the whole context written to the cache again).
+ */
+export function idleCosts(c: Costs, keepMs: number, ttlMs: number): { keep: number; cold: number } {
+  return { keep: keepCost(c.ping, keepMs, ttlMs) + c.turnHere, cold: c.cold }
+}
+
+/** One warm against the 5-hour window; the idle prompt, kept or cold, against the weekly one. */
+export function shareLine(c: Costs, keepMs: number, ttlMs: number, r: Rates): { warm: string; keep: string; cold: string } {
+  const idle = idleCosts(c, keepMs, ttlMs)
   return {
-    warm: pctText(pingUsd, r.five_hour, '5h'),
-    keep: pctText(keepCost(pingUsd, keepMs, ttlMs), r.seven_day, 'wk'),
+    warm: pctText(c.ping, r.five_hour, '5h'),
+    keep: pctText(idle.keep, r.seven_day, 'wk'),
+    cold: pctText(idle.cold, r.seven_day, 'wk'),
   }
+}
+
+/** The band's comparison: '10h: keep 0.6% vs cold 1.0% wk', in dollars until the rate is known. */
+export function idleText(c: Costs, keepMs: number, ttlMs: number, sh: { keep: string; cold: string }): string {
+  const h = Math.round(keepMs / (60 * MIN))
+  if (sh.keep && sh.cold) return `${h}h: keep ${sh.keep.replace(' wk', '')} vs cold ${sh.cold}`
+  const idle = idleCosts(c, keepMs, ttlMs)
+  return `${h}h: keep ${usd(idle.keep)} vs cold ${usd(idle.cold)}`
 }
 
 // ---- small helpers ----
@@ -828,13 +846,15 @@ export const register: Register = (on, options) => {
         const f = await facts($, t)
         const c = costs(f.ctx, f.base, usdPerMTok)
         const j = await read($, judge)
-        const sh = shareLine(c.ping, keepMs, ttlMs, await read($, rates))
+        const sh = shareLine(c, keepMs, ttlMs, await read($, rates))
         const keepH = Math.round(keepMs / (60 * MIN))
+        const idle = idleCosts(c, keepMs, ttlMs)
         return {
           text: [
             `Cache: ${f.leftMs > 0 ? `${clockText(f.leftMs)} left` : 'cold'} (TTL ${ttlMs / MIN} min)`,
             `Context: ${Math.round(f.ctx / 1000)}k tokens`,
-            `Warm ping ≈ ${usd(c.ping)}${sh.warm ? ` (${sh.warm})` : ''} · keep ${keepH}h ≈ ${usd(keepCost(c.ping, keepMs, ttlMs))}${sh.keep ? ` (${sh.keep})` : ''}`,
+            `Warm ping ≈ ${usd(c.ping)}${sh.warm ? ` (${sh.warm})` : ''}`,
+            `A prompt after ${keepH}h idle: kept warm ≈ ${usd(idle.keep)}${sh.keep ? ` (${sh.keep})` : ''} · cold ≈ ${usd(idle.cold)}${sh.cold ? ` (${sh.cold})` : ''} · ${idle.keep < idle.cold ? 'keep-warm is cheaper' : 'cold is cheaper'}`,
             `Cold rewrite ≈ ${usd(c.cold)} · fresh session ≈ ${usd(c.fresh)}`,
             `Usage share: ${sh.warm || sh.keep ? 'learned from this account' : 'learning (needs a subscription and ~$0.50 of use)'}`,
             `Per turn: ${f.ctx > 0 ? payback(f) : '—'}`,
@@ -867,7 +887,7 @@ export const register: Register = (on, options) => {
     const trialDone = await read($, isTrialDone)
     const summary = await read($, trialSummary)
     const narrow = e.props.bodyColumns < 90
-    const sh = shareLine(c.ping, keepMs, ttlMs, await read($, rates))
+    const sh = shareLine(c, keepMs, ttlMs, await read($, rates))
 
     const color = f.leftMs <= 0 ? 'inactive' : f.leftMs <= pingMargin(ttlMs) ? 'error' : f.leftMs <= ttlMs / 4 ? 'warning' : 'success'
     const label =
@@ -885,7 +905,7 @@ export const register: Register = (on, options) => {
               {f.ctx > 0 ? ` · ctx ${Math.round(f.ctx / 1000)}k` : ''}
               {f.ctx > 0 && f.window > 0 ? ` ${Math.round((f.ctx / f.window) * 100)}%` : ''}
               {f.ctx > 0 ? ` · warm ≈ ${usd(c.ping)}${sh.warm ? ` ${sh.warm}` : ''}` : ''}
-              {f.ctx > 0 && sh.keep ? ` · ${Math.round(keepMs / (60 * MIN))}h ${sh.keep}` : ''}
+              {f.ctx > 0 ? ` · ${idleText(c, keepMs, ttlMs, sh)}` : ''}
               {f.leftMs <= 0 && f.ctx > 0 ? ` · resume ≈ ${usd(c.cold)}` : ''}
             </Text>
             {f.keepLeftMs > 0 && (
