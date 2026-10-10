@@ -374,20 +374,67 @@ export function bar(fraction: number, cells: number): string {
   return '▰'.repeat(full) + '▱'.repeat(cells - full)
 }
 
+const HANDOFF_SECTIONS = [
+  'Sections, terse, under 150 lines in all:',
+  '1. Goal: what the person asked for, in their words.',
+  '2. State: what is done, verified, and how it was verified (commands, counts).',
+  '3. Decisions and constraints the person gave in this session.',
+  '4. Files touched, with path:line for anything important.',
+  '5. Failed attempts and why they failed.',
+  '6. Open questions and the next three steps.',
+  '7. A fenced block headed PROMPT: the exact text to paste into a fresh session, naming this file.',
+]
+
+export function handoffPath(dir: string, stamp: string): string {
+  return `${dir ? dir.replace(/\/$/, '') : '.'}/HANDOFF-${stamp}.md`
+}
+
 export function handoffPrompt(dir: string, stamp: string): string {
-  const path = `${dir ? dir.replace(/\/$/, '') : '.'}/HANDOFF-${stamp}.md`
   return [
-    `Write a handoff file to ${path} so a fresh session can continue this work without this conversation.`,
-    'Sections, terse, under 150 lines in all:',
-    '1. Goal: what the person asked for, in their words.',
-    '2. State: what is done, verified, and how it was verified (commands, counts).',
-    '3. Decisions and constraints the person gave in this session.',
-    '4. Files touched, with path:line for anything important.',
-    '5. Failed attempts and why they failed.',
-    '6. Open questions and the next three steps.',
-    '7. A fenced block headed PROMPT: the exact text to paste into a fresh session, naming this file.',
+    `Write a handoff file to ${handoffPath(dir, stamp)} so a fresh session can continue this work without this conversation.`,
+    ...HANDOFF_SECTIONS,
     'Then reply with the path and one line: run /clear and paste the PROMPT block.',
   ].join('\n')
+}
+
+/** The fork has no tools: it answers the file's text and the mod writes it. */
+export function compactHandoffPrompt(path: string): string {
+  return [
+    'The conversation is about to be auto-compacted. Write the handoff file that lets a fresh session',
+    `continue this work without this conversation; it will be saved to ${path}.`,
+    ...HANDOFF_SECTIONS,
+    'Reply with the file\'s Markdown only: no preamble, no closing line, no outer code fence.',
+  ].join('\n')
+}
+
+/**
+ * Saves a handoff file before an auto-compaction, then lets the compaction run
+ * with the summary told where the file is. Never blocks the compaction: a fork
+ * or write that fails passes the event on unchanged.
+ */
+export async function saveHandoffBeforeCompact<R>(
+  $: EngineInterface,
+  e: { instructions?: string } & Record<string, unknown>,
+  next: (e: never) => Promise<R>,
+): Promise<R> {
+  const pass = next as unknown as (x: typeof e) => Promise<R>
+  try {
+    const t = new Date(await $.clock.now())
+    const stamp = t.toISOString().slice(0, 16).replace(/[:T]/g, '-')
+    const dir = cfg.handoffDir || (await $.session.cwd())
+    const path = handoffPath(dir, stamp)
+    const r = await $.model.fork({ prompt: compactHandoffPrompt(path) })
+    if (!r.isAnswered || !r.text.trim()) {
+      $.ui.toast(`cache-keeper: no handoff before compaction (${r.isAnswered ? 'empty' : r.reason})`)
+      return pass(e)
+    }
+    await $.fs.write(path, r.text.trim() + '\n')
+    $.ui.toast(`cache-keeper: handoff saved before compaction: ${path}`)
+    const note = `A handoff file was saved at ${path} just before this compaction. Name that path in the summary.`
+    return pass({ ...e, instructions: e.instructions ? `${e.instructions}\n\n${note}` : note })
+  } catch {
+    return pass(e)
+  }
 }
 
 type Cfg = { ttlMs: number; keepMs: number; usdPerMTok: number; handoffDir: string }
@@ -695,6 +742,10 @@ export const register: Register = (on, options) => {
     }
     return next(e)
   })
+
+  on('session.compact', { trigger: 'auto' }, ($, e, next) =>
+    e.agentId === undefined ? saveHandoffBeforeCompact($, e, next as never) : next(e),
+  ).catch(($, e, next) => next(e)) // a failure here never holds up the compaction
 
   on('prompt.submit', async ($, e, next) => {
     if (e.origin.kind === 'composer' || e.origin.kind === 'bridge') {

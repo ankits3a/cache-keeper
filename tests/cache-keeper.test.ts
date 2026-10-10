@@ -279,3 +279,72 @@ describe('usage share', () => {
     expect(pctText(0.01, 1, '5h')).toBe('<0.1% 5h')
   })
 })
+
+const MSGS = [{ role: 'user' as const, text: 'build it', toolUses: [] }]
+
+describe('handoff before auto-compaction', () => {
+  test('the file is written first, then the compaction runs told where it is', async ($, on) => {
+    mock.clock(on, { now: Date.UTC(2026, 9, 10, 20, 15) })
+    on('ui.toast', () => ({ value: undefined }))
+    on('session.cwd', () => ({ value: '/work' }))
+    on('model.fork', () => ({
+      value: {
+        isAnswered: true as const,
+        text: '# Handoff\nGoal: x\n',
+        usage: { input_tokens: 1, output_tokens: 9, cache_read_input_tokens: 100, cache_creation_input_tokens: 0 },
+      },
+    }))
+    const order: string[] = []
+    let file = { path: '', text: '' }
+    on('fs.write', (_$, e) => {
+      order.push('write')
+      file = e as unknown as typeof file
+      return { value: undefined }
+    })
+    let seen: { instructions?: string } = {}
+    on('session.compact', (_$, x) => {
+      order.push('compact')
+      seen = x
+      return { skip: 'test' }
+    })
+    await $.session.compact({ trigger: 'auto', messages: MSGS })
+    expect(order).toEqual(['write', 'compact'])
+    expect(file.path).toBe('/work/HANDOFF-2026-10-10-20-15.md')
+    expect(file.text).toBe('# Handoff\nGoal: x\n')
+    expect(seen.instructions).toContain('/work/HANDOFF-2026-10-10-20-15.md')
+  })
+
+  test('a fork that fails never blocks the compaction', async ($, on) => {
+    mock.clock(on, { now: 1_000_000 })
+    on('ui.toast', () => ({ value: undefined }))
+    on('session.cwd', () => ({ value: '/work' }))
+    on('model.fork', () => ({ value: { isAnswered: false as const, reason: 'nothing-to-fork' as const } }))
+    let writes = 0
+    on('fs.write', () => {
+      writes += 1
+      return { value: undefined }
+    })
+    let ran = false
+    let seen: { instructions?: string } = { instructions: 'x' }
+    on('session.compact', (_$, x) => {
+      ran = true
+      seen = x
+      return { skip: 'test' }
+    })
+    await $.session.compact({ trigger: 'auto', messages: MSGS })
+    expect(ran).toBe(true)
+    expect(writes).toBe(0)
+    expect(seen.instructions).toBeUndefined()
+  })
+
+  test('the person\'s own /compact is left alone', async ($, on) => {
+    let forks = 0
+    on('model.fork', () => {
+      forks += 1
+      return { value: { isAnswered: false as const, reason: 'nothing-to-fork' as const } }
+    })
+    on('session.compact', () => ({ skip: 'test' }))
+    await $.session.compact({ trigger: 'manual', messages: MSGS })
+    expect(forks).toBe(0)
+  })
+})
