@@ -1,6 +1,6 @@
 {
   "name": "cache-keeper",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "author": { "name": "Abhi Chaudhary" },
   "description": "Band above the prompt: prompt-cache time left, Warm button, keep warm for 10 h unattended, and a Handoff button suggested when the session goes off track (signals judge vs model judge, compared over 5 sessions).",
   "types": "./types/index.d.ts",

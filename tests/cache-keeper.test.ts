@@ -8,6 +8,10 @@ import {
   digest,
   drifted,
   isCorrection,
+  keepCost,
+  learnRate,
+  pctText,
+  shareLine,
   parseVerdict,
   payback,
   reason,
@@ -240,4 +244,38 @@ describe('trial end', () => {
       expect(await ui.find({ text: /handoff trial done/ })).toBeUndefined()
     })
   }
+})
+
+describe('usage share', () => {
+  test('a rate is read only once the window moved a point and $0.50 was spent', () => {
+    let l = learnRate(undefined, 10, 1)
+    expect(l.pctPerUsd).toBe(0)
+    l = learnRate(l, 10.5, 3)
+    expect(l.pctPerUsd).toBe(0)
+    l = learnRate(l, 12, 3)
+    expect(l.pctPerUsd).toBe(1)
+  })
+
+  test('the lowest reading is kept, since other sessions only inflate one', () => {
+    let l = learnRate(undefined, 0, 0, 2)
+    l = learnRate(l, 6, 1)
+    expect(l.pctPerUsd).toBe(2)
+    l = learnRate(l, 7, 2)
+    expect(l.pctPerUsd).toBe(1)
+  })
+
+  test('a window that reset re-anchors and keeps the rate', () => {
+    const l = learnRate({ anchorPct: 80, anchorUsd: 5, pctPerUsd: 1.5 }, 3, 6)
+    expect(l).toEqual({ anchorPct: 3, anchorUsd: 6, pctPerUsd: 1.5 })
+  })
+
+  test('one warm counts against 5h, a 10h keep against the week', () => {
+    expect(Math.round(keepCost(0.1, 600 * 60_000, 60 * 60_000) * 100)).toBe(110)
+    expect(shareLine(0.1, 600 * 60_000, 60 * 60_000, { five_hour: 2, seven_day: 0.5 })).toEqual({
+      warm: '0.2% 5h',
+      keep: '0.6% wk',
+    })
+    expect(shareLine(0.1, 600 * 60_000, 60 * 60_000, {})).toEqual({ warm: '', keep: '' })
+    expect(pctText(0.01, 1, '5h')).toBe('<0.1% 5h')
+  })
 })

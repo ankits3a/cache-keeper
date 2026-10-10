@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { Judge, Ping, TrialSession, Verdict } from '../types'
+import type { Judge, Ping, Rates, TrialSession, Verdict } from '../types'
 
 // Prompt-cache keeper: a band above the prompt with the time the session's
 // prompt cache has left, a Warm button (one tool-less fork over the session's
@@ -33,6 +33,7 @@ const judge = atom({ plugin: 'cache-keeper', key: 'judge' } as const, 'trial' as
 const trial = atom({ plugin: 'cache-keeper', key: 'trial' } as const, null as TrialSession | null)
 const isTrialDone = atom({ plugin: 'cache-keeper', key: 'isTrialDone' } as const, false)
 const trialSummary = atom({ plugin: 'cache-keeper', key: 'trialSummary' } as const, [] as string[])
+const rates = atom({ plugin: 'cache-keeper', key: 'rates' } as const, {} as Rates)
 
 type Options = {
   ttlMinutes?: number
@@ -112,8 +113,7 @@ export function reason(f: Facts): string {
     return `cache cold: resuming rewrites ${kTok(f.ctx)} ≈ ${usd(c.cold)}, fresh ≈ ${usd(c.fresh)}`
   }
   if (f.keepLeftMs > 0) {
-    const pings = Math.ceil(f.keepLeftMs / Math.max(MIN, f.ttlMs - pingMargin(f.ttlMs)))
-    const keep = pings * c.ping
+    const keep = keepCost(c.ping, f.keepLeftMs, f.ttlMs)
     if (keep > c.fresh) {
       return `keeping warm ≈ ${usd(keep)} > fresh session ≈ ${usd(c.fresh)}`
     }
@@ -304,6 +304,52 @@ export function compareText(list: readonly TrialSession[]): string {
   ].join('\n')
 }
 
+// ---- share of the plan's usage limits ----
+
+/** One limit window's learning: where this session last stood, and the % one dollar moves it. */
+export type RateLearner = { anchorPct: number; anchorUsd: number; pctPerUsd: number }
+
+const MIN_LEARN_PCT = 1 // a window must move a whole point before a rate is read from it
+const MIN_LEARN_USD = 0.5
+
+/**
+ * Learns how many percent of a limit window one dollar of this session's spend
+ * uses. The window counts every session on the account, so a busy neighbour
+ * only ever inflates a reading: the lowest reading is kept. A window that reset
+ * (the % fell) or a session whose cost restarted is re-anchored, rate kept.
+ */
+export function learnRate(prev: RateLearner | undefined, pct: number, spentUsd: number, known = 0): RateLearner {
+  const base = prev?.pctPerUsd || known
+  if (!prev || pct < prev.anchorPct || spentUsd < prev.anchorUsd) {
+    return { anchorPct: pct, anchorUsd: spentUsd, pctPerUsd: base }
+  }
+  const dPct = pct - prev.anchorPct
+  const dUsd = spentUsd - prev.anchorUsd
+  if (dPct < MIN_LEARN_PCT || dUsd < MIN_LEARN_USD) return { ...prev, pctPerUsd: base }
+  const r = dPct / dUsd
+  return { anchorPct: pct, anchorUsd: spentUsd, pctPerUsd: base > 0 ? Math.min(base, r) : r }
+}
+
+/** The pings a keep-warm span takes and what they cost. */
+export function keepCost(pingUsd: number, spanMs: number, ttlMs: number): number {
+  return Math.ceil(spanMs / Math.max(MIN, ttlMs - pingMargin(ttlMs))) * pingUsd
+}
+
+/** A spend as a share of a limit window: '0.4% 5h', '' while the rate is unknown. */
+export function pctText(spendUsd: number, pctPerUsd: number | undefined, label: string): string {
+  if (!pctPerUsd || pctPerUsd <= 0) return ''
+  const p = spendUsd * pctPerUsd
+  return `${p < 0.1 ? '<0.1' : p < 10 ? p.toFixed(1) : p.toFixed(0)}% ${label}`
+}
+
+/** One warm against the 5-hour window, a keep-warm span against the weekly one. */
+export function shareLine(pingUsd: number, keepMs: number, ttlMs: number, r: Rates): { warm: string; keep: string } {
+  return {
+    warm: pctText(pingUsd, r.five_hour, '5h'),
+    keep: pctText(keepCost(pingUsd, keepMs, ttlMs), r.seven_day, 'wk'),
+  }
+}
+
 // ---- small helpers ----
 
 /** How long before expiry a keep-warm ping goes out. */
@@ -352,6 +398,7 @@ let warnedFor = 0
 let tick: { cancel: () => void } | undefined
 // Signals of this session; they start over on a reload of the module.
 let calls: Call[] = []
+let learners: Record<string, RateLearner> = {}
 let earlyDirs: string[] = []
 let recentDirs: string[] = []
 let prompts: boolean[] = []
@@ -592,6 +639,8 @@ export const register: Register = (on, options) => {
     })
     const j = ((await $.store.get('judge')) as Judge | undefined) ?? 'trial'
     await update($, judge, () => j)
+    const stored = ((await $.store.get('rates')) as Rates | undefined) ?? {}
+    await update($, rates, () => stored)
     const id = await $.session.id()
     const t = await $.clock.now()
     const list = ((await $.store.get('sessions')) as TrialSession[] | undefined) ?? []
@@ -620,6 +669,22 @@ export const register: Register = (on, options) => {
   })
 
   on('session.measure', async ($, e, next) => {
+    const spent = e.cost?.usd
+    if (spent !== undefined && e.rateLimits.length > 0) {
+      const known = await read($, rates)
+      let moved = false
+      for (const w of e.rateLimits) {
+        const l = learnRate(learners[w.kind], w.percentUsed, spent, known[w.kind])
+        learners = { ...learners, [w.kind]: l }
+        if (l.pctPerUsd > 0 && l.pctPerUsd !== known[w.kind]) moved = true
+      }
+      if (moved) {
+        const learned: Rates = { ...known }
+        for (const [k, l] of Object.entries(learners)) if (l.pctPerUsd > 0) learned[k] = l.pctPerUsd
+        await update($, rates, () => learned)
+        await $.store.set('rates', learned)
+      }
+    }
     const tokens = e.context.tokens
     if (e.changed.includes('context') && tokens !== undefined) {
       await update($, ctxTokens, () => tokens)
@@ -712,11 +777,15 @@ export const register: Register = (on, options) => {
         const f = await facts($, t)
         const c = costs(f.ctx, f.base, usdPerMTok)
         const j = await read($, judge)
+        const sh = shareLine(c.ping, keepMs, ttlMs, await read($, rates))
+        const keepH = Math.round(keepMs / (60 * MIN))
         return {
           text: [
             `Cache: ${f.leftMs > 0 ? `${clockText(f.leftMs)} left` : 'cold'} (TTL ${ttlMs / MIN} min)`,
             `Context: ${Math.round(f.ctx / 1000)}k tokens`,
-            `Warm ping ≈ ${usd(c.ping)} · cold rewrite ≈ ${usd(c.cold)} · fresh session ≈ ${usd(c.fresh)}`,
+            `Warm ping ≈ ${usd(c.ping)}${sh.warm ? ` (${sh.warm})` : ''} · keep ${keepH}h ≈ ${usd(keepCost(c.ping, keepMs, ttlMs))}${sh.keep ? ` (${sh.keep})` : ''}`,
+            `Cold rewrite ≈ ${usd(c.cold)} · fresh session ≈ ${usd(c.fresh)}`,
+            `Usage share: ${sh.warm || sh.keep ? 'learned from this account' : 'learning (needs a subscription and ~$0.50 of use)'}`,
             `Per turn: ${f.ctx > 0 ? payback(f) : '—'}`,
             `Keep-warm: ${f.keepLeftMs > 0 ? `${clockText(f.keepLeftMs)} left` : 'off'}`,
             `Judge: ${j}${j === 'trial' ? ' (signals and model side by side)' : ''}`,
@@ -747,6 +816,7 @@ export const register: Register = (on, options) => {
     const trialDone = await read($, isTrialDone)
     const summary = await read($, trialSummary)
     const narrow = e.props.bodyColumns < 90
+    const sh = shareLine(c.ping, keepMs, ttlMs, await read($, rates))
 
     const color = f.leftMs <= 0 ? 'inactive' : f.leftMs <= pingMargin(ttlMs) ? 'error' : f.leftMs <= ttlMs / 4 ? 'warning' : 'success'
     const label =
@@ -763,7 +833,8 @@ export const register: Register = (on, options) => {
             <Text dimColor>
               {f.ctx > 0 ? ` · ctx ${Math.round(f.ctx / 1000)}k` : ''}
               {f.ctx > 0 && f.window > 0 ? ` ${Math.round((f.ctx / f.window) * 100)}%` : ''}
-              {f.ctx > 0 ? ` · warm ≈ ${usd(c.ping)}` : ''}
+              {f.ctx > 0 ? ` · warm ≈ ${usd(c.ping)}${sh.warm ? ` ${sh.warm}` : ''}` : ''}
+              {f.ctx > 0 && sh.keep ? ` · ${Math.round(keepMs / (60 * MIN))}h ${sh.keep}` : ''}
               {f.leftMs <= 0 && f.ctx > 0 ? ` · resume ≈ ${usd(c.cold)}` : ''}
             </Text>
             {f.keepLeftMs > 0 && (

@@ -1,3 +1,6 @@
+/** Percent of each plan limit window (`five_hour`, `seven_day`) one dollar uses, learned per account. */
+export type Rates = Record<string, number>
+
 export type Ping = { at: number; ok: boolean; usd: number; note: string }
 
 /** One judge's record in one session: when it first called a handoff, and how the person rated it. */
@@ -48,6 +51,7 @@ declare module 'claude-code' {
       trial: TrialSession | null
       isTrialDone: boolean
       trialSummary: string[]
+      rates: Rates
     }
   }
 }
