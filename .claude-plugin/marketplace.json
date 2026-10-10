@@ -1,0 +1,6 @@
+{
+  "name": "cache-keeper",
+  "description": "Prompt-cache band with warm, keep-warm and handoff suggestions for Claude Code.",
+  "owner": { "name": "Abhi Chaudhary" },
+  "plugins": [{ "name": "cache-keeper", "source": "./" }]
+}
