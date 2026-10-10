@@ -197,7 +197,7 @@ describe('band', () => {
         component: 'AbovePrompt',
         props: PROPS,
       })
-      expect((await ui.find({ key: 'keep' }))?.text).toContain('Keep 10h')
+      expect((await ui.find({ key: 'keep' }))?.text).toContain('Keep 12h')
 
       await ui.press({ key: 'keep' })
       expect(await ui.find({ key: 'stop' })).toBeDefined()

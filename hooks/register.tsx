@@ -360,7 +360,7 @@ export function shareLine(c: Costs, keepMs: number, ttlMs: number, r: Rates): { 
   }
 }
 
-/** The band's comparison: '10h: keep 0.6% vs cold 1.0% wk', in dollars until the rate is known. */
+/** The band's comparison: '12h: keep 0.6% vs cold 1.0% wk', in dollars until the rate is known. */
 export function idleText(c: Costs, keepMs: number, ttlMs: number, sh: { keep: string; cold: string }): string {
   const h = Math.round(keepMs / (60 * MIN))
   if (sh.keep && sh.cold) return `${h}h: keep ${sh.keep.replace(' wk', '')} vs cold ${sh.cold}`
@@ -457,7 +457,7 @@ export async function saveHandoffBeforeCompact<R>(
 
 type Cfg = { ttlMs: number; keepMs: number; usdPerMTok: number; handoffDir: string }
 
-let cfg: Cfg = { ttlMs: 60 * MIN, keepMs: 600 * MIN, usdPerMTok: 5, handoffDir: '' }
+let cfg: Cfg = { ttlMs: 60 * MIN, keepMs: 720 * MIN, usdPerMTok: 5, handoffDir: '' }
 let isBusy = false
 let warnedFor = 0
 let tick: { cancel: () => void } | undefined
@@ -690,7 +690,7 @@ export const register: Register = (on, options) => {
   const opt = options as Options
   cfg = {
     ttlMs: Math.max(1, opt.ttlMinutes ?? 60) * MIN,
-    keepMs: Math.max(0.5, opt.keepHours ?? 10) * 60 * MIN,
+    keepMs: Math.max(0.5, opt.keepHours ?? 12) * 60 * MIN,
     usdPerMTok: opt.inputUsdPerMTok ?? 5,
     handoffDir: opt.handoffDir ?? '',
   }
